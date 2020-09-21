@@ -733,6 +733,35 @@ func (g *gkeDeployer) cleanupNat() error {
 	return nil
 }
 
+func (g *gkeDeployer) cleanupDNSZones() error {
+	out, err := control.Output(exec.Command("gcloud", "dns", "managed-zones", "list",
+		"--project="+g.project,
+		"--format=value(name)"))
+	if err != nil {
+		return fmt.Errorf("Error listing DNS zones: %v", err)
+	}
+	zoneNames := strings.Split(string(out), "\n")
+	for _, zone := range zoneNames {
+		if !strings.HasPrefix(zone, g.cluster) {
+			log.Printf("Skipping DNS zone %q that is not part of cluster %q", zone, g.cluster)
+			continue
+		}
+		log.Printf("Found DNS zone %q, deleting records", zone)
+		// delete all DNS records in zone before deleting the zone
+		err = control.FinishRunning(exec.Command("gcloud", "dns", "record-sets", "import",
+			"-z", zone, "--delete-all-existing", "/dev/null", "--project="+g.project))
+		if err != nil {
+			return fmt.Errorf("Failed to delete records in DNS zone %q: %v", zone, err)
+		}
+		log.Printf("Deleting DNS zone %q", zone)
+		err = control.FinishRunning(exec.Command("gcloud", "dns", "managed-zones", "delete", "--project="+g.project))
+		if err != nil {
+			return fmt.Errorf("Failed to delete DNS zone %q: %v", zone, err)
+		}
+	}
+	return nil
+}
+
 func (g *gkeDeployer) Down() error {
 	firewall, err := g.getClusterFirewall()
 	if err != nil {
@@ -776,6 +805,9 @@ func (g *gkeDeployer) Down() error {
 	}
 	errNetwork := control.FinishRunning(exec.Command("gcloud", "compute", "networks", "delete", "-q", g.network,
 		"--project="+g.project))
+
+	errDNSZone := cleanupDNSZones()
+
 	if errCluster != nil {
 		return fmt.Errorf("error deleting cluster: %v", errCluster)
 	}
@@ -796,6 +828,9 @@ func (g *gkeDeployer) Down() error {
 	}
 	if numLeakedFWRules > 0 {
 		return fmt.Errorf("leaked firewall rules")
+	}
+	if errDNSZone != nil {
+		return fmt.Errorf("error cleaning up DNS zones: %v", errDNSZone)
 	}
 	return nil
 }
